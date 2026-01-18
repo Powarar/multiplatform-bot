@@ -1,0 +1,6 @@
+aiogram==3.17.0
+sqlalchemy==2.0.36
+aiosqlite==0.20.0
+pydantic==2.10.5
+pydantic-settings==2.7.1
+python-dotenv==1.0.1
