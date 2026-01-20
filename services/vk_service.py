@@ -2,37 +2,51 @@ import vk_api
 from vk_api.exceptions import ApiError
 from typing import Optional, Dict, Any
 import logging
+import asyncio
+from functools import wraps
 
 logger = logging.getLogger(__name__)
 
+def async_wrap(func):
+    @wraps(func)
+    async def wrapper(*args, **kwargs):
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, lambda: func(*args, **kwargs))
+    return wrapper
 
 class VKService:
-    """Сервис для работы с VK API"""
-    
     def __init__(self, access_token: str):
         self.access_token = access_token
-        self.session = vk_api.VkApi(token=access_token)
-        self.api = self.session.get_api()
-    
-    async def get_group_info(self, group_id: str) -> Optional[Dict[str, Any]]:
-        """Получить информацию о группе/сообществе"""
         try:
-            # Убираем префиксы если есть (club, public, event)
+            self.session = vk_api.VkApi(token=access_token)
+            self.api = self.session.get_api()
+        except Exception as e:
+            logger.error(f"Failed to initialize VK API: {e}")
+            raise
+
+    async def get_group_info(self, group_id: str) -> Optional[Dict[str, Any]]:
+        try:
             clean_id = group_id.replace('club', '').replace('public', '').replace('event', '')
             
-            # Если это короткое имя (screen_name), получаем ID
             if not clean_id.isdigit() and not clean_id.startswith('-'):
-                result = self.api.utils.resolveScreenName(screen_name=clean_id)
-                if result and result['type'] == 'group':
+                loop = asyncio.get_event_loop()
+                result = await loop.run_in_executor(
+                    None,
+                    lambda: self.api.utils.resolveScreenName(screen_name=clean_id)
+                )
+                if result and result.get('type') == 'group':
                     clean_id = str(result['object_id'])
                 else:
                     return None
             
-            # Убираем минус если есть
             clean_id = clean_id.replace('-', '')
             
-            # Получаем информацию о группе
-            groups = self.api.groups.getById(group_id=clean_id)
+            loop = asyncio.get_event_loop()
+            groups = await loop.run_in_executor(
+                None,
+                lambda: self.api.groups.getById(group_id=clean_id)
+            )
+            
             if groups:
                 return groups[0]
             return None
@@ -43,56 +57,52 @@ class VKService:
         except Exception as e:
             logger.error(f"Error getting VK group info: {e}")
             return None
-    
+
     async def post_to_wall(
-        self, 
-        group_id: str, 
+        self,
+        group_id: str,
         message: str,
         attachments: Optional[list] = None,
         photo_paths: Optional[list] = None
     ) -> Optional[int]:
-        """
-        Опубликовать пост на стене группы
-        
-        Args:
-            group_id: ID группы (без минуса)
-            message: Текст поста
-            attachments: Список вложений в формате type{owner_id}_{media_id}
-            photo_paths: Пути к фотографиям для загрузки
-            
-        Returns:
-            ID опубликованного поста или None при ошибке
-        """
         try:
-            owner_id = f"-{group_id.replace('-', '')}"
+            clean_group_id = group_id.replace('-', '')
+            owner_id = f"-{clean_group_id}"
             
             uploaded_attachments = []
             
-            # Загружаем фото если есть
             if photo_paths:
-                upload = vk_api.VkUpload(self.session)
+                loop = asyncio.get_event_loop()
                 for photo_path in photo_paths:
-                    photo = upload.photo_wall(
-                        photo_path,
-                        group_id=group_id.replace('-', '')
-                    )
-                    uploaded_attachments.append(
-                        f"photo{photo[0]['owner_id']}_{photo[0]['id']}"
-                    )
+                    try:
+                        upload = vk_api.VkUpload(self.session)
+                        photo = await loop.run_in_executor(
+                            None,
+                            lambda p=photo_path: upload.photo_wall(p, group_id=clean_group_id)
+                        )
+                        if photo:
+                            uploaded_attachments.append(
+                                f"photo{photo[0]['owner_id']}_{photo[0]['id']}"
+                            )
+                    except Exception as e:
+                        logger.error(f"Error uploading photo: {e}")
+                        continue
             
-            # Добавляем переданные вложения
             if attachments:
                 uploaded_attachments.extend(attachments)
             
-            # Публикуем пост
-            result = self.api.wall.post(
-                owner_id=owner_id,
-                message=message,
-                attachments=','.join(uploaded_attachments) if uploaded_attachments else None,
-                from_group=1  # Публикация от имени группы
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: self.api.wall.post(
+                    owner_id=owner_id,
+                    message=message,
+                    attachments=','.join(uploaded_attachments) if uploaded_attachments else None,
+                    from_group=1
+                )
             )
             
-            return result['post_id']
+            return result.get('post_id')
             
         except ApiError as e:
             logger.error(f"VK API error while posting: {e}")
@@ -100,11 +110,10 @@ class VKService:
         except Exception as e:
             logger.error(f"Error posting to VK wall: {e}")
             return None
-    
+
     @staticmethod
     def get_auth_url(app_id: int, redirect_uri: str) -> str:
-        """Получить URL для авторизации пользователя"""
-        scope = "wall,photos,groups,offline"  # offline для permanent token
+        scope = "wall,photos,groups,offline"
         return (
             f"https://oauth.vk.com/authorize?"
             f"client_id={app_id}&"
@@ -117,7 +126,6 @@ class VKService:
     
     @staticmethod
     def validate_token(access_token: str) -> bool:
-        """Проверить валидность токена"""
         try:
             session = vk_api.VkApi(token=access_token)
             api = session.get_api()
