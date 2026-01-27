@@ -64,9 +64,6 @@ cp .env.example .env
 ```dotenv
 BOT_TOKEN=YOUR_TELEGRAM_BOT_TOKEN
 ADMIN_IDS=123456789,987654321
-VK_APP_ID=YOUR_VK_APP_ID
-VK_SERVICE_KEY=YOUR_VK_SERVICE_KEY
-DATABASE_URL=sqlite+aiosqlite:///./multi_platform_bot.db
 ```
 
 ## 🔑 Получение ключей доступа

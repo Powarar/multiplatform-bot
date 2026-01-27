@@ -2,25 +2,46 @@ from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
+from database import async_session_maker
+from models import User
+from sqlalchemy import select
+
 router = Router()
+
 
 @router.message(Command("start"))
 async def cmd_start(message: Message):
+    async with async_session_maker() as session:
+        result = await session.execute(
+            select(User).where(User.telegram_id == message.from_user.id)
+        )
+        user = result.scalar_one_or_none()
+
+        if not user:
+            user = User(
+                telegram_id=message.from_user.id,
+                username=message.from_user.username
+            )
+            session.add(user)
+            await session.commit()
+
     await message.answer(
-        "🤖 Добро пожаловать в бота для мультиплатформенных постов!\n\n"
-        "Доступные команды:\n"
-        "/add_community - Добавить сообщество\n"
-        "/my_communities - Мои сообщества\n"
-        "/new_post - Создать новый пост\n"
-        "/my_posts - Мои посты"
+        "Привет! Я бот для публикации постов в Telegram и VK.\n\n"
+        "Команды:\n"
+        "/add_community — добавить канал/группу\n"
+        "/my_communities — список сообществ\n"
+        "/new_post — создать пост и опубликовать\n"
+        "/forward_to_vk — переслать реплаем в VK\n"
+        "/help — справка"
     )
+
 
 @router.message(Command("help"))
 async def cmd_help(message: Message):
     await message.answer(
-        "📚 Помощь:\n\n"
-        "1. Добавьте канал командой /add_community\n"
-        "2. Создайте пост командой /new_post\n"
-        "3. Выберите каналы для публикации\n"
-        "4. Готово! Пост опубликован 🎉"
+        "Команды:\n"
+        "/add_community — добавить канал/группу\n"
+        "/my_communities — список сообществ\n"
+        "/new_post — создать пост и опубликовать\n"
+        "/forward_to_vk — ответь на сообщение и отправь в VK\n"
     )

@@ -3,229 +3,194 @@ from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from database import async_session_maker
-from services.community_service import CommunityService
-from services.vk_service import VKService
-from config import settings
-import logging
 
-logger = logging.getLogger(__name__)
+from sqlalchemy import select
+
+from database import async_session_maker
+from models import User, Community, PlatformType
+from services.vk_service import VKService
+
 router = Router()
 
 
 class AddCommunityState(StatesGroup):
     waiting_for_platform = State()
-    waiting_for_telegram_id = State()
+
+    waiting_for_tg_id = State()
+    waiting_for_tg_name = State()
+
     waiting_for_vk_token = State()
-    waiting_for_vk_group_id = State()
+    waiting_for_vk_group = State()
 
 
 @router.message(Command("add_community"))
-async def add_community_start(message: Message, state: FSMContext):
-    """Начало добавления сообщества"""
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📱 Telegram", callback_data="platform_telegram")],
-        [InlineKeyboardButton(text="🔵 VK", callback_data="platform_vk")],
-        [InlineKeyboardButton(text="🐘 MAX", callback_data="platform_max")]
+async def add_community(message: Message, state: FSMContext):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📱 Telegram", callback_data="add_tg")],
+        [InlineKeyboardButton(text="🔵 VK", callback_data="add_vk")],
     ])
-    await message.answer("Выберите платформу:", reply_markup=keyboard)
+    await message.answer("Выбери платформу:", reply_markup=kb)
     await state.set_state(AddCommunityState.waiting_for_platform)
 
 
-#--------------------------------------------------------------
-@router.callback_query(AddCommunityState.waiting_for_platform, F.data.startswith("platform_"))
+@router.callback_query(AddCommunityState.waiting_for_platform, F.data.in_(["add_tg", "add_vk"]))
 async def platform_selected(callback: CallbackQuery, state: FSMContext):
-    """Обработка выбора платформы"""
-    platform = callback.data.split("_")[1]
-    await state.update_data(platform=platform)
-
-    if platform == "telegram":
+    if callback.data == "add_tg":
+        await state.update_data(platform=PlatformType.TELEGRAM)
         await callback.message.edit_text(
-            "📱 <b>Telegram</b>\n\n"
-            "Отправьте ID канала (например: @channel или -1001234567890)\n"
-            "⚠️ Бот должен быть администратором канала!",
-            parse_mode="HTML"
+            "Отправь ID/username канала.\n\n"
+            "Примеры:\n"
+            "@mychannel\n"
+            "-1001234567890\n\n"
+            "Бот должен быть админом канала."
         )
-        await state.set_state(AddCommunityState.waiting_for_telegram_id)
-        
-    elif platform == "vk":
+        await state.set_state(AddCommunityState.waiting_for_tg_id)
 
-        auth_url = VKService.get_auth_url(settings.VK_APP_ID, settings.VK_REDIRECT_URI)
-        
+    if callback.data == "add_vk":
+        await state.update_data(platform=PlatformType.VK)
         await callback.message.edit_text(
-            "🔵 <b>VK (ВКонтакте)</b>\n\n"
-            "Для добавления сообщества VK необходим токен доступа.\n\n"
-            "1️⃣ Перейдите по ссылке для авторизации:\n"
-            f"<a href='{auth_url}'>Получить токен доступа</a>\n\n"
-            "2️⃣ Разрешите доступ к группам\n"
-            "3️⃣ Скопируйте access_token из адресной строки\n"
-            "4️⃣ Отправьте токен сюда\n\n"
-            "ℹ️ Токен начинается с vk1.a... и должен быть полным",
-            parse_mode="HTML",
-            disable_web_page_preview=True
+            "Отправь **токен сообщества VK**.\n\n"
+            "Настройки группы → Управление → API → Ключи доступа.\n"
+            "Права: wall, photos.",
+            parse_mode="Markdown"
         )
         await state.set_state(AddCommunityState.waiting_for_vk_token)
-        
-    else:
-        await callback.message.edit_text("❌ Эта платформа пока не поддерживается")
-        await state.clear()
+
+    await callback.answer()
 
 
-@router.message(AddCommunityState.waiting_for_telegram_id)
-async def telegram_id_received(message: Message, state: FSMContext):
-    """Обработка ID Telegram канала"""
+@router.message(AddCommunityState.waiting_for_tg_id)
+async def tg_id_received(message: Message, state: FSMContext):
+    tg_id = message.text.strip()
+    await state.update_data(community_id=tg_id)
+    await message.answer("Теперь отправь название (как будет отображаться).")
+    await state.set_state(AddCommunityState.waiting_for_tg_name)
+
+
+@router.message(AddCommunityState.waiting_for_tg_name)
+async def tg_name_received(message: Message, state: FSMContext):
+    name = message.text.strip()
     data = await state.get_data()
-    platform = data.get("platform")
-    community_id = message.text.strip()
+    community_id = data["community_id"]
 
-    try:
-        # Проверяем доступ к каналу
-        chat = await message.bot.get_chat(community_id)
-        community_name = chat.title or chat.username or community_id
+    async with async_session_maker() as session:
+        u = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
+        user = u.scalar_one_or_none()
+        if not user:
+            await message.answer("Сначала /start")
+            await state.clear()
+            return
 
-        async with async_session_maker() as session:
-            service = CommunityService(session)
-            await service.add_community(
-                user_id=message.from_user.id,
-                platform=platform,
-                community_id=str(chat.id),
-                community_name=community_name
-            )
+        session.add(Community(
+            user_id=user.id,
+            platform=PlatformType.TELEGRAM,
+            community_id=community_id,
+            community_name=name,
+            access_token=None
+        ))
+        await session.commit()
 
-        await message.answer(
-            f"✅ Канал <b>'{community_name}'</b> успешно добавлен!",
-            parse_mode="HTML"
-        )
-    except Exception as e:
-        logger.error(f"Error adding Telegram channel: {e}")
-        await message.answer(
-            f"❌ Ошибка при добавлении канала:\n{str(e)}\n\n"
-            "Убедитесь, что:\n"
-            "• ID канала указан верно\n"
-            "• Бот является администратором канала"
-        )
-
+    await message.answer(f"✅ Telegram-канал добавлен: {name}")
     await state.clear()
 
 
 @router.message(AddCommunityState.waiting_for_vk_token)
 async def vk_token_received(message: Message, state: FSMContext):
-    """Обработка VK токена"""
     token = message.text.strip()
-    
-    # Удаляем сообщение с токеном для безопасности
+
     try:
         await message.delete()
-    except:
+    except Exception:
         pass
-    
-    # Проверяем токен
+
     if not VKService.validate_token(token):
         await message.answer(
-            "❌ Неверный токен доступа!\n\n"
-            "Убедитесь, что:\n"
-            "• Токен скопирован полностью\n"
-            "• Вы разрешили необходимые права\n"
-            "• Токен не истек"
+            "❌ Токен невалидный.\n"
+            "Проверь что он полный и имеет права wall/photos.\n\n"
+            "Отправь токен ещё раз."
         )
-        await state.clear()
         return
-    
-    await state.update_data(access_token=token)
-    
+
+    await state.update_data(vk_token=token)
     await message.answer(
-        "✅ Токен принят!\n\n"
-        "Теперь отправьте ID или короткое имя группы VK\n\n"
-        "<b>Примеры:</b>\n"
-        "• club123456789\n"
-        "• public123456789\n"
-        "• -123456789\n"
-        "• mygroup (короткое имя)\n\n"
-        "ℹ️ Вы должны быть администратором группы",
-        parse_mode="HTML"
+        "✅ Токен принят.\n"
+        "Теперь отправь ID / screen_name / ссылку группы.\n\n"
+        "Примеры:\n"
+        "mygroup\n"
+        "123456789\n"
+        "vk.com/mygroup"
     )
-    await state.set_state(AddCommunityState.waiting_for_vk_group_id)
+    await state.set_state(AddCommunityState.waiting_for_vk_group)
 
 
-@router.message(AddCommunityState.waiting_for_vk_group_id)
-async def vk_group_id_received(message: Message, state: FSMContext):
-    """Обработка ID VK группы"""
+@router.message(AddCommunityState.waiting_for_vk_group)
+async def vk_group_received(message: Message, state: FSMContext):
+    group_input = message.text.strip()
     data = await state.get_data()
-    platform = data.get("platform")
-    access_token = data.get("access_token")
-    group_id = message.text.strip()
-    
-    try:
+    token = data["vk_token"]
 
-        vk_service = VKService(access_token)
-        
+    vk = VKService(token)
+    group = await vk.get_group_info(group_input)
+    if not group:
+        await message.answer("❌ Не смог найти группу. Проверь ID/screen_name и права токена.")
+        return
 
-        group_info = await vk_service.get_group_info(group_id)
-        
-        if not group_info:
-            await message.answer(
-                "❌ Не удалось найти группу!\n\n"
-                "Проверьте:\n"
-                "• Правильность ID/имени группы\n"
-                "• Является ли группа публичной\n"
-                "• Есть ли у вас права администратора"
-            )
+    group_id = str(group["id"])
+    group_name = group.get("name", f"VK {group_id}")
+
+    async with async_session_maker() as session:
+        u = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
+        user = u.scalar_one_or_none()
+        if not user:
+            await message.answer("Сначала /start")
             await state.clear()
             return
-        
-        community_name = group_info['name']
-        community_id = str(group_info['id'])
-        
-        # Сохраняем в БД
-        async with async_session_maker() as session:
-            service = CommunityService(session)
-            await service.add_community(
-                user_id=message.from_user.id,
-                platform=platform,
-                community_id=community_id,
-                community_name=community_name,
-                access_token=access_token
+
+        exists = await session.execute(
+            select(Community).where(
+                Community.user_id == user.id,
+                Community.platform == PlatformType.VK,
+                Community.community_id == group_id
             )
-        
-        await message.answer(
-            f"✅ Группа VK <b>'{community_name}'</b> успешно добавлена!\n\n"
-            f"🔗 <a href='https://vk.com/club{community_id}'>Открыть группу</a>",
-            parse_mode="HTML",
-            disable_web_page_preview=True
         )
-        
-    except Exception as e:
-        logger.error(f"Error adding VK community: {e}")
-        await message.answer(
-            f"❌ Ошибка при добавлении группы:\n{str(e)}"
-        )
-    
+        if exists.scalar_one_or_none():
+            await message.answer("ℹ️ Эта VK группа уже добавлена.")
+            await state.clear()
+            return
+
+        session.add(Community(
+            user_id=user.id,
+            platform=PlatformType.VK,
+            community_id=group_id,
+            community_name=group_name,
+            access_token=token
+        ))
+        await session.commit()
+
+    await message.answer(f"✅ VK группа добавлена: {group_name} (id={group_id})")
     await state.clear()
 
 
 @router.message(Command("my_communities"))
 async def my_communities(message: Message):
-    """Показать список добавленных сообществ"""
     async with async_session_maker() as session:
-        service = CommunityService(session)
-        communities = await service.get_user_communities(message.from_user.id)
+        u = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
+        user = u.scalar_one_or_none()
+        if not user:
+            await message.answer("Сначала /start")
+            return
 
-    if not communities:
-        await message.answer("📭 У вас нет добавленных сообществ")
+        result = await session.execute(select(Community).where(Community.user_id == user.id))
+        comms = result.scalars().all()
+
+    if not comms:
+        await message.answer("Пока нет сообществ. Добавь через /add_community")
         return
 
-    text = "📋 <b>Ваши сообщества:</b>\n\n"
-    for comm in communities:
-        if comm.platform.value == "telegram":
-            emoji = "📱"
-            link = f"tg://resolve?domain={comm.community_id.replace('@', '')}"
-        elif comm.platform.value == "vk":
-            emoji = "🔵"
-            link = f"https://vk.com/club{comm.community_id}"
-        else:
-            emoji = "🔗"
-            link = "#"
-        
-        text += f"{emoji} <a href='{link}'>{comm.community_name}</a> ({comm.platform.value})\n"
+    lines = ["Ваши сообщества:\n"]
+    for c in comms:
+        prefix = "📱 TG" if c.platform == PlatformType.TELEGRAM else "🔵 VK"
+        token_ok = "" if c.platform == PlatformType.TELEGRAM else ("✅token" if c.access_token else "❌token")
+        lines.append(f"{prefix} — {c.community_name} ({c.community_id}) {token_ok}")
 
-    await message.answer(text, parse_mode="HTML", disable_web_page_preview=True)
+    await message.answer("\n".join(lines))
