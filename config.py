@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite+aiosqlite:///./multi_platform_bot.db"
 
     VK_API_VERSION: str = "5.131"
+    VK_USER_TOKEN: str 
 
     @field_validator("ADMIN_IDS", mode="before")
     @classmethod
@@ -25,3 +26,4 @@ settings = Settings()
 BOT_TOKEN = settings.BOT_TOKEN
 ADMIN_IDS = settings.ADMIN_IDS
 DATABASE_URL = settings.DATABASE_URL
+VK_USER_TOKEN = settings.VK_USER_TOKEN 
